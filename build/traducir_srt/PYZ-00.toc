@@ -1,4 +1,4 @@
-('C:\\Users\\NewBi\\desktop\\build\\traducir_srt\\PYZ-00.pyz',
+('C:\\Users\\NewBi\\OneDrive\\Documentos\\Proyectos\\Terminados\\SubToEsp\\SubToEsp\\build\\traducir_srt\\PYZ-00.pyz',
  [('PIL',
    'C:\\Users\\NewBi\\AppData\\Local\\Programs\\Python\\Python39\\lib\\site-packages\\PIL\\__init__.py',
    'PYMODULE'),

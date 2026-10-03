@@ -5,7 +5,7 @@ a = Analysis(
     ['traducir_srt.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('Logo1.png', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
