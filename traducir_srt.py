@@ -36,7 +36,7 @@ Reglas:
 8. Cada CUE de entrada = una CUE de salida. No juntes, no partas, no reordenes.
 9. Conserva la cantidad de líneas internas de cada cue.
 10. Largo similar al original (aprox. ±20%). Una cue corta sigue corta.
-11. Conserva etiquetas SRT (<i>, <b>, <font>) en el mismo lugar.
+11. No uses etiquetas HTML ni ASS: nada de <i>, <b>, <font> ni {\\i1}. Texto plano, compatible con Smart TV.
 12. No expliques. No pongas notas. No traduzcas números de cue ni timestamps.
 13. Si una línea ya está en español o es ininteligible, déjala igual.
 14. Interjecciones: adáptalas al tono ("Yeah." → "Sí." / "Claro." / "Ajá.").
@@ -168,9 +168,24 @@ def obtener_nombre_con_1(nombre_archivo):
     return f"{base} (1){ext}"
 
 
+def limpiar_formato_srt(texto):
+    texto = re.sub(r"</?[^>]+>", "", texto or "")
+    texto = re.sub(r"\{[^}]*\}", "", texto)
+    texto = (
+        texto.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+    )
+    return re.sub(r"[ \t]+", " ", texto).strip()
+
+
+def limpiar_lineas(lineas):
+    return [limpiar_formato_srt(linea) for linea in (lineas or [])]
+
+
 def texto_cue(lineas):
-    texto = " ".join(linea.strip() for linea in (lineas or []) if linea.strip())
-    return re.sub(r"<[^>]+>", "", texto).strip()
+    return " ".join(linea for linea in limpiar_lineas(lineas) if linea)
 
 
 def tiempo_corto(tiempo):
@@ -192,7 +207,7 @@ def parsear_cues(texto):
         cues.append({
             "numero": numero,
             "tiempo": lineas[tiempo_idx].strip(),
-            "dialogo": lineas[tiempo_idx + 1:],
+            "dialogo": limpiar_lineas(lineas[tiempo_idx + 1:]),
         })
     return cues
 
@@ -200,9 +215,10 @@ def parsear_cues(texto):
 def reconstruir_desde_cues(cues):
     partes = []
     for cue in cues:
-        dialogo = cue.get("traducido") or cue["dialogo"]
-        partes.append("\n".join([cue["numero"], cue["tiempo"], *dialogo]))
-    return "\n\n".join(partes) + "\n"
+        dialogo = limpiar_lineas(cue.get("traducido") or cue["dialogo"])
+        dialogo = dialogo or [""]
+        partes.append("\r\n".join([cue["numero"], cue["tiempo"], *dialogo]))
+    return "\r\n\r\n".join(partes) + "\r\n"
 
 
 def postprocesar_latino(texto):
@@ -318,9 +334,12 @@ def _parsear_respuesta_llm(texto, cantidad):
     patron = re.compile(r"CUE\s+(\d+)\s*\n(.*?)(?=\nCUE\s+\d+\s*\n|\Z)", re.S)
     for match in patron.finditer(texto.replace("\r\n", "\n")):
         encontrados[int(match.group(1))] = match.group(2).strip("\n")
-    if len(encontrados) < cantidad:
-        raise RuntimeError("El modelo no devolvio todas las cues")
-    return [encontrados[i].split("\n") for i in range(1, cantidad + 1)]
+    if not encontrados:
+        raise RuntimeError("El modelo no devolvio cues reconocibles")
+    return [
+        limpiar_lineas(encontrados[i].split("\n")) if i in encontrados else None
+        for i in range(1, cantidad + 1)
+    ]
 
 
 def adaptar_lote_gemini(cues, api_key):
@@ -364,7 +383,14 @@ def adaptar_cue_maquina(cue):
         return list(cue["dialogo"])
     texto = "\n".join(cue["dialogo"])
     traducido = postprocesar_latino(_traducir_maquina(texto))
-    return ajustar_lineas(traducido.split("\n"), cue["dialogo"])
+    return limpiar_lineas(ajustar_lineas(traducido.split("\n"), cue["dialogo"]))
+
+
+def _aplicar_traduccion(cue, lineas):
+    cue["traducido"] = limpiar_lineas(ajustar_lineas(lineas, cue["dialogo"]))
+    cue["traducido"] = [postprocesar_latino(linea) for linea in cue["traducido"]]
+    if not any(linea.strip() for linea in cue["traducido"]) and any(cue["dialogo"]):
+        cue["traducido"] = list(cue["dialogo"])
 
 
 def adaptar_cues(cues, cancelar, on_cue):
@@ -376,6 +402,7 @@ def adaptar_cues(cues, cancelar, on_cue):
             break
         if clave:
             lote = cues[i:i + LOTE_LLM]
+            adaptados = None
             try:
                 adaptados = adaptar_lote_gemini(lote, clave)
             except Exception:
@@ -384,18 +411,25 @@ def adaptar_cues(cues, cancelar, on_cue):
                 for j, cue in enumerate(lote):
                     if cancelar.is_set():
                         return motor
-                    cue["traducido"] = ajustar_lineas(adaptados[j], cue["dialogo"])
-                    cue["traducido"] = [postprocesar_latino(linea) for linea in cue["traducido"]]
-                    tag, motivo = verificar_cue(cue["dialogo"], cue["traducido"])
+                    try:
+                        if adaptados[j]:
+                            _aplicar_traduccion(cue, adaptados[j])
+                        else:
+                            cue["traducido"] = adaptar_cue_maquina(cue)
+                        tag, motivo = verificar_cue(cue["dialogo"], cue["traducido"])
+                    except Exception as e:
+                        cue["traducido"] = list(cue["dialogo"])
+                        tag, motivo = "MAL", str(e)[:40]
                     on_cue(i + j, len(cues), cue, tag, motivo)
                 i += len(lote)
                 continue
         cue = cues[i]
         try:
             cue["traducido"] = adaptar_cue_maquina(cue)
-        except Exception:
+            tag, motivo = verificar_cue(cue["dialogo"], cue["traducido"])
+        except Exception as e:
             cue["traducido"] = list(cue["dialogo"])
-        tag, motivo = verificar_cue(cue["dialogo"], cue["traducido"])
+            tag, motivo = "MAL", str(e)[:40]
         on_cue(i, len(cues), cue, tag, motivo)
         i += 1
         time.sleep(0.15)
@@ -447,24 +481,16 @@ def _append_log(indice, total, cue, tag, motivo):
     app.label_porcentaje.config(text=f"{indice + 1}/{total}   {tag}{extra}")
 
 
-def _alerta_calidad(ok, raro, mal, vistos):
-    if vistos < 4:
-        return False
-    if mal >= 2 or raro > vistos / 2:
-        return True
-    return False
-
-
 def _correr_adaptacion(cues, guardar, titulo):
     app.cancelar.clear()
     _en_ui(_set_ocupado, True)
     _en_ui(app.cargar_tabla, cues)
     ok = raro = mal = 0
-    alerta = False
     inicio = time.time()
+    motor = "Gemini latino neutro"
 
     def on_cue(indice, total, cue, tag, motivo):
-        nonlocal ok, raro, mal, alerta
+        nonlocal ok, raro, mal
         if tag == "OK":
             ok += 1
         elif tag == "RARO":
@@ -472,16 +498,20 @@ def _correr_adaptacion(cues, guardar, titulo):
         else:
             mal += 1
         _en_ui(_append_log, indice, total, cue, tag, motivo)
-        if _alerta_calidad(ok, raro, mal, indice + 1):
-            alerta = True
-            app.cancelar.set()
 
     try:
         motor = adaptar_cues(cues, app.cancelar, on_cue)
-    except Exception as e:
-        _en_ui(messagebox.showerror, "Error de traduccion", str(e))
-        _en_ui(_set_ocupado, False)
-        return
+    except Exception:
+        for i, cue in enumerate(cues):
+            if cancelar_activo() or cue.get("traducido") is not None:
+                continue
+            try:
+                cue["traducido"] = adaptar_cue_maquina(cue)
+                tag, motivo = verificar_cue(cue["dialogo"], cue["traducido"])
+            except Exception as e:
+                cue["traducido"] = list(cue["dialogo"])
+                tag, motivo = "MAL", str(e)[:40]
+            on_cue(i, len(cues), cue, tag, motivo)
 
     duracion = round(time.time() - inicio, 1)
     hechos = sum(1 for cue in cues if cue.get("traducido") is not None)
@@ -490,31 +520,12 @@ def _correr_adaptacion(cues, guardar, titulo):
     def finalizar():
         _set_ocupado(False)
         app.actualizar_motor()
-        if alerta:
-            app.label_porcentaje.config(text=f"Calidad baja. Detenido ({duracion}s)")
-            messagebox.showwarning(
-                "Verificador",
-                "La adaptacion viene mal (ingles, calcos o frases raras).\n"
-                "La detuve para que no esperes todo el archivo.",
-            )
-            if guardar and hechos and messagebox.askyesno(
-                "Detenido",
-                f"Se adaptaron {hechos}/{len(cues)} cues.\n¿Guardar lo que ya está listo?",
-            ):
-                _guardar_cues(cues)
-            return
-        if cancelado and not guardar:
-            app.label_porcentaje.config(text=f"Prueba detenida ({duracion}s)")
-            return
-        if cancelado and guardar:
-            if hechos and messagebox.askyesno(
-                "Detenido",
-                f"Se adaptaron {hechos}/{len(cues)} cues.\n¿Guardar lo que ya está listo?",
-            ):
-                _guardar_cues(cues)
-            app.label_porcentaje.config(text=f"Detenido ({duracion}s)")
-            return
         resumen = f"{titulo}  ·  {motor}  ·  OK {ok}   RARO {raro}   MAL {mal}   ({duracion}s)"
+        if cancelado:
+            app.label_porcentaje.config(text=f"Detenido  ·  {resumen}")
+            if guardar and hechos:
+                _guardar_cues(cues)
+            return
         app.label_porcentaje.config(text=resumen)
         if guardar:
             _guardar_cues(cues)
@@ -529,10 +540,14 @@ def _correr_adaptacion(cues, guardar, titulo):
     _en_ui(finalizar)
 
 
+def cancelar_activo():
+    return app.cancelar.is_set()
+
+
 def _guardar_cues(cues):
     nuevo = reconstruir_desde_cues(cues)
     nombre = obtener_nombre_con_1(app.archivo_actual)
-    with open(nombre, "w", encoding="utf-8") as f:
+    with open(nombre, "w", encoding="utf-8-sig", newline="") as f:
         f.write(nuevo)
     messagebox.showinfo("Listo", f"Archivo guardado como:\n{os.path.basename(nombre)}")
 
